@@ -26,7 +26,7 @@ from numpy.linalg import inv
 ### The default model uses the 0.0025 as weight-on-views scalar parameter tau and
 ### MaximumSharpeRatioPortfolioOptimizer that accepts a 63-row matrix of 1-day returns.
 ### </summary>
-class CustomBlackLitterman(PortfolioConstructionModel):
+class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstructionModel):
     """Contains minor bugfixes in preparation to allow multiple alphas generating non-uniform insights
     """
     def __init__(self,
