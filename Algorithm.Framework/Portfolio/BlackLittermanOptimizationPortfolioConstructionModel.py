@@ -12,7 +12,7 @@
 # limitations under the License.
 
 from AlgorithmImports import *
-from CustomSharpeOptimizer import MaximumSharpeRatioPortfolioOptimizer
+from Portfolio.MaximumSharpeRatioPortfolioOptimizer import MaximumSharpeRatioPortfolioOptimizer
 from itertools import groupby
 from numpy import dot, transpose
 from numpy.linalg import inv
