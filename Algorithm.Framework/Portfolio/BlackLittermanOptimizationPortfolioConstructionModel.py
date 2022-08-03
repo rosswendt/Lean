@@ -12,7 +12,7 @@
 # limitations under the License.
 
 from AlgorithmImports import *
-from Portfolio.MaximumSharpeRatioPortfolioOptimizer import MaximumSharpeRatioPortfolioOptimizer
+from CustomSharpeOptimizer import MaximumSharpeRatioPortfolioOptimizer
 from itertools import groupby
 from numpy import dot, transpose
 from numpy.linalg import inv
@@ -26,7 +26,9 @@ from numpy.linalg import inv
 ### The default model uses the 0.0025 as weight-on-views scalar parameter tau and
 ### MaximumSharpeRatioPortfolioOptimizer that accepts a 63-row matrix of 1-day returns.
 ### </summary>
-class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstructionModel):
+class CustomBlackLitterman(PortfolioConstructionModel):
+    """Contains minor bugfixes in preparation to allow multiple alphas generating non-uniform insights
+    """
     def __init__(self,
                  rebalance = Resolution.Daily,
                  portfolioBias = PortfolioBias.LongShort,
@@ -51,7 +53,6 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
             risk_free_rate(float): The risk free rate
             delta(float): The risk aversion coeffficient of the market portfolio
             tau(float): The model parameter indicating the uncertainty of the CAPM prior"""
-        super().__init__()
         self.lookback = lookback
         self.period = period
         self.resolution = resolution
@@ -88,7 +89,7 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
         if P is not None:
             returns = dict()
             # Updates the BlackLittermanSymbolData with insights
-            # Create a dictionary keyed by the symbols in the insights with an pandas.Series as value to create a data frame
+            # Create a dictionary keyed by the symbols in the insights with a pandas.Series as value to create a data frame
             for insight in lastActiveInsights:
                 symbol = insight.Symbol
                 symbolData = self.symbolDataBySymbol.get(symbol, self.BlackLittermanSymbolData(symbol, self.lookback, self.period))
@@ -99,6 +100,9 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
                 returns[symbol] = symbolData.Return
 
             returns = pd.DataFrame(returns)
+            
+            if returns is None:
+                return targets
 
             # Calculate prior estimate of the mean and covariance
             Pi, Sigma = self.get_equilibrium_return(returns)
@@ -112,18 +116,22 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
 
             for symbol, weight in weights.items():
                 for insight in lastActiveInsights:
-                    if str(insight.Symbol) == str(symbol):
-                        # don't trust the optimizer
-                        if self.portfolioBias != PortfolioBias.LongShort and self.sign(weight) != self.portfolioBias:
-                            weight = 0
-                        targets[insight] = weight
-                        break
+                    if lastActiveInsights is None or weights is None:
+                        continue
+                    else:
+                        if str(insight.Symbol) == str(symbol):
+                            # don't trust the optimizer
+                            if self.portfolioBias != PortfolioBias.LongShort and self.sign(weight) != self.portfolioBias:
+                                weight = 0
+                            targets[insight] = weight
+                            break
 
         return targets
 
     def GetTargetInsights(self):
         # Get insight that haven't expired of each symbol that is still in the universe
         activeInsights = self.InsightCollection.GetActiveInsights(self.Algorithm.UtcTime)
+        
 
         # Get the last generated active insight for each symbol
         lastActiveInsights = []
@@ -140,10 +148,12 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
 
         # Get removed symbol and invalidate them in the insight collection
         super().OnSecuritiesChanged(algorithm, changes)
-
+        
         for security in changes.RemovedSecurities:
             symbol = security.Symbol
             symbolData = self.symbolDataBySymbol.pop(symbol, None)
+            #self.InsightCollection.Clear([symbol])
+            algorithm.Debug(str(security.Symbol))
             if symbolData is not None:
                 symbolData.Reset()
 
@@ -167,6 +177,7 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
                 symbolData.Update(utcTime, close)
 
             self.symbolDataBySymbol[symbol] = symbolData
+            #symbolData.RegisterIndicators(algorithm)
 
     def apply_blacklitterman_master_formula(self, Pi, Sigma, P, Q):
         '''Apply Black-Litterman master formula
@@ -177,9 +188,9 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
             P: A matrix that identifies the assets involved in the views (size: K x N)
             Q: A view vector (size: K x 1)'''
         ts = self.tau * Sigma
-
+        
         # Create the diagonal Sigma matrix of error terms from the expressed views
-        omega = np.dot(np.dot(P, ts), P.T) * np.eye(Q.shape[0])
+        omega = np.dot(np.dot(P, ts), P.T) * np.eye(Q.shape[0]) # this is square, possibly not the right size all the time
         if np.linalg.det(omega) == 0:
             return Pi, Sigma
 
@@ -229,32 +240,41 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
         try:
             P = {}
             Q = {}
+            
+            
+            # Possibly find model with max insights here,
+            # and fill out "empty"ish matrices (not actually 0 valued cuz thatd make them nonsingular)
+            # where they do not have insights, make sure to fill insights low-insight models actually do have 
+            
             for model, group in groupby(insights, lambda x: x.SourceModel):
-                group = list(group)
-
-                up_insights_sum = 0.0
-                dn_insights_sum = 0.0
-                for insight in group:
-                    if insight.Direction == InsightDirection.Up:
-                        up_insights_sum = up_insights_sum + np.abs(insight.Magnitude)
-                    if insight.Direction == InsightDirection.Down:
-                        dn_insights_sum = dn_insights_sum + np.abs(insight.Magnitude)
-
-                q = up_insights_sum if up_insights_sum > dn_insights_sum else dn_insights_sum
-                if q == 0:
+                if insights is None or model is None:
                     continue
-
-                Q[model] = q
-
-                # generate the link matrix of views: P
-                P[model] = dict()
-                for insight in group:
-                    value = insight.Direction * np.abs(insight.Magnitude)
-                    P[model][insight.Symbol] = value / q
-                # Add zero for other symbols that are listed but active insight
-                for symbol in self.symbolDataBySymbol.keys():
-                    if symbol not in P[model]:
-                        P[model][symbol] = 0
+                else:
+                    group = list(group)
+    
+                    up_insights_sum = 0.0
+                    dn_insights_sum = 0.0
+                    for insight in group:
+                        if insight.Direction == InsightDirection.Up:
+                            up_insights_sum = up_insights_sum + np.abs(insight.Magnitude)
+                        if insight.Direction == InsightDirection.Down:
+                            dn_insights_sum = dn_insights_sum + np.abs(insight.Magnitude)
+    
+                    q = up_insights_sum if up_insights_sum > dn_insights_sum else dn_insights_sum
+                    if q == 0:
+                        continue
+    
+                    Q[model] = q
+    
+                    # generate the link matrix of views: P
+                    P[model] = dict()
+                    for insight in group:
+                        value = insight.Direction * np.abs(insight.Magnitude)
+                        P[model][insight.Symbol] = value / q
+                            
+                    for insight in insights: 
+                        if insight.Symbol not in P[model]: 
+                            P[model][insight.Symbol] = 0
 
             Q = np.array([[x] for x in Q.values()])
             if len(Q) > 0:
@@ -270,9 +290,9 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
         '''Contains data specific to a symbol required by this model'''
         def __init__(self, symbol, lookback, period):
             self.symbol = symbol
-            self.roc = RateOfChange(f'{symbol}.ROC({lookback})', lookback)
+            self.roc = RateOfChange(symbol, lookback)
             self.roc.Updated += self.OnRateOfChangeUpdated
-            self.window = RollingWindow[IndicatorDataPoint](period)
+            self.window = RollingWindow[IndicatorDataPoint](period) # This is a rolling window of insights
 
         def Reset(self):
             self.roc.Updated -= self.OnRateOfChangeUpdated
@@ -285,7 +305,7 @@ class BlackLittermanOptimizationPortfolioConstructionModel(PortfolioConstruction
         def OnRateOfChangeUpdated(self, roc, value):
             if roc.IsReady:
                 self.window.Add(value)
-
+                        
         def Add(self, time, value):
             if self.window.Samples > 0 and self.window[0].EndTime == time:
                 return
